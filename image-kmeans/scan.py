@@ -13,6 +13,8 @@ import os
 import numpy
 import matplotlib.pyplot as plt
 
+from pillow import Image
+
 from keras.preprocessing.image import load_img
 from keras.applications.vgg19 import preprocess_input, VGG19
 from keras.models import Model
@@ -24,14 +26,25 @@ from sklearn.metrics import silhouette_score
 from utils import make_csv, view_cluster
 
 # 1012 images
+LEARNING_RATE = 0.001
 BATCH_SIZE = 200
 IMAGE_SIZE = (224, 224)
 MIN_CLUSTERS = 3
 MAX_CLUSTERS = 20
 
-def preprocess_image(image) -> numpy.array:
+def preprocess_image(image: str) -> numpy.array:
     img = numpy.array(load_img(image, target_size=(224,224)))
     return preprocess_input(img.reshape(224, 224, 3))
+
+def image_variation_training(model: Model, image: str) -> numpy.array:
+    """
+    Custom training loop to improve according to the distance between variations
+    of a same image
+    """
+    img = Image.open(image)
+    inpt = [
+        preprocess_input(image.reshape(224,244,3)),
+    ]
 
 def main() -> int:
     if len(sys.argv) != 3:
@@ -53,47 +66,54 @@ def main() -> int:
     print(numpy.shape(imgs))
     os.chdir(pwd)
 
-    # Copy vgg19 model without the softmax layer
-    model = VGG19()
-    model = Model(inputs=model.inputs, outputs=model.layers[-2].output)
+    # Copy vgg16 model without initial weights and remove the softmax layer
+    model = Sequential()
+    model.add(Conv2D(input_shape(224,244,3), filters=64, kernel_size=(3,3),
+        padding="same", activation="relu"))
+    model.add(Conv2D(filters=64, kernel_size=(3,3), padding="same", activation="relu"))
+    model.add(MaxPool2D(pool_size=(2,2), strides=(2,2)))
 
-    features = model.predict(imgs, use_multiprocessing=True)
+    model.add(Conv2D(filters=128, kernel_size=(3,3), padding="same", activation="relu"))
+    model.add(Conv2D(filters=128, kernel_size=(3,3), padding="same", activation="relu"))
+    model.add(MaxPool2D(pool_size=(2,2), strides=(2,2)))
 
-    # Reduce the amount of dimensions with PCA
-    pca = PCA(n_components=150)
-    pca.fit(features)
-    final_features = pca.transform(features)
+    model.add(Conv2D(filters=256, kernel_size=(3,3), padding="same", activation="relu"))
+    model.add(Conv2D(filters=256, kernel_size=(3,3), padding="same", activation="relu"))
+    model.add(Conv2D(filters=256, kernel_size=(3,3), padding="same", activation="relu"))
+    model.add(MaxPool2D(pool_size=(2,2), strides=(2,2)))
 
-    """
-    # Cluster
-    silhouette = list()
-    rnge = list(range(MIN_CLUSTERS, MAX_CLUSTERS))
-    for k in range(MIN_CLUSTERS, MAX_CLUSTERS):
-        kmeans = KMeans(n_clusters=k).fit(final_features)
-        # Silhouette
-        silhouette.append(
-            silhouette_score(final_features, kmeans.labels_, metric="euclidean")
-        )
+    model.add(Conv2D(filters=512, kernel_size=(3,3), padding="same", activation="relu"))
+    model.add(Conv2D(filters=512, kernel_size=(3,3), padding="same", activation="relu"))
+    model.add(Conv2D(filters=512, kernel_size=(3,3), padding="same", activation="relu"))
+    model.add(MaxPool2D(pool_size=(2,2), strides=(2,2)))
 
-    # Plot silhouette
-    plt.figure(figsize=(10, 10))
-    plt.plot(rnge, silhouette)
-    plt.show()
+    model.add(Conv2D(filters=512, kernel_size=(3,3), padding="same", activation="relu"))
+    model.add(Conv2D(filters=512, kernel_size=(3,3), padding="same", activation="relu"))
+    model.add(Conv2D(filters=512, kernel_size=(3,3), padding="same", activation="relu"))
+    model.add(MaxPool2D(pool_size=(2,2), strides=(2,2)))
 
-    optimal_k = max(range(len(silhouette)), key=silhouette.__getitem__)
-    print(f"Optimal k: {optimal_k}")
-    """
-    kmeans = KMeans(n_clusters=16, n_init=250).fit(final_features)
+    model.add(Flatten())
+    model.add(Dense(units=4096, activation="relu"))
+    model.add(Dense(units=4096, activation="relu"))
 
-    # Save results to csv
-    make_csv("vgg19.csv", images[:BATCH_SIZE], kmeans.labels_)
+    model.compile(
+        optimizer = Adam(lr=LEARNING_RATE),
+        loss = keras.lossed.categorical_crossentropy, metrics=["accuracy"]
+    )
 
-    # View biggest cluster
-    pwd = os.getcwd()
-    os.chdir(sys.argv[2])
-    view_cluster(sys.argv[2], images[:BATCH_SIZE], kmeans.labels_,
-        numpy.bincount(kmeans.labels_).argmax())
-    os.chdir(pwd)
+    print(model.summary())
+
+    # Checkpoint that saves to memory in case it improved from the previous version
+    checkpoint = ModelCheckpoint("scan_s1.h5", monitor="val_acc", verbose=1,
+        save_best_only=True, save_weights_only=False, mode="auto", period=1)
+
+    hist = model.fit_generator(
+        epochs = 100,
+        steps_per_epoch = 100,
+        generator=traindata,
+        validation_data=testdata,
+        callbacks=[checkpoint, early]
+    )
     
 if __name__ == "__main__":
     sys.exit(main())
