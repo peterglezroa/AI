@@ -34,21 +34,21 @@ def preprocess_image(image) -> numpy.array:
     return preprocess_input(img.reshape(224, 224, 3))
 
 def main() -> int:
-    if len(sys.argv) != 2:
+    if len(sys.argv) != 3:
         print(f"usage: {sys.argv[0]} <path where to save/load model> "\
             "<path to folder including the labeled images>")
         return -1
 
     # Scan directory
     images = list()
-    with os.scandir(sys.argv[1]) as files:
+    with os.scandir(sys.argv[2]) as files:
         for file in files:
             images.append(file.name)
     images = numpy.array(images)
 
     # Preprocess images
     pwd = os.getcwd()
-    os.chdir(sys.argv[1])
+    os.chdir(sys.argv[2])
     imgs = numpy.array([preprocess_image(img) for img in images[:BATCH_SIZE]])
     print(numpy.shape(imgs))
     os.chdir(pwd)
@@ -90,8 +90,8 @@ def main() -> int:
 
     # View biggest cluster
     pwd = os.getcwd()
-    os.chdir(sys.argv[1])
-    view_cluster(images[:BATCH_SIZE], kmeans.labels_,
+    os.chdir(sys.argv[2])
+    view_cluster(sys.argv[2], images[:BATCH_SIZE], kmeans.labels_,
         numpy.bincount(kmeans.labels_).argmax())
     os.chdir(pwd)
     
