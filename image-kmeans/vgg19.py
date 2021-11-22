@@ -26,7 +26,7 @@ from utils import make_csv, view_cluster
 # 1012 images
 BATCH_SIZE = 200
 IMAGE_SIZE = (224, 224)
-MIN_CLUSTERS = 3
+MIN_CLUSTERS = 10
 MAX_CLUSTERS = 20
 
 def preprocess_image(image) -> numpy.array:
@@ -64,7 +64,6 @@ def main() -> int:
     pca.fit(features)
     final_features = pca.transform(features)
 
-    """
     # Cluster
     silhouette = list()
     rnge = list(range(MIN_CLUSTERS, MAX_CLUSTERS))
@@ -82,8 +81,11 @@ def main() -> int:
 
     optimal_k = max(range(len(silhouette)), key=silhouette.__getitem__)
     print(f"Optimal k: {optimal_k}")
-    """
-    kmeans = KMeans(n_clusters=16, n_init=250).fit(final_features)
+
+    kmeans = KMeans(
+        n_clusters=int(optimal_k)+MIN_CLUSTERS,
+        n_init=150
+    ).fit(final_features)
 
     # Save results to csv
     make_csv("vgg19.csv", images[:BATCH_SIZE], kmeans.labels_)
