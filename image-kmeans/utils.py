@@ -26,22 +26,3 @@ def view_cluster(ids:numpy.array, clusters:numpy.array, cid:int=0):
             plt.axis("off")
             limit += 1
     plt.show()
-
-def image_transformations(file_name: str) -> numpy.array:
-    trans = list()
-    with Image.open(file_name) as img:
-        img = img.resize((224,224))
-
-        trans.append(numpy.array(img))
-        trans.append(numpy.array(img.rotate(45)))
-        trans.append(numpy.array(img.transform(img.size, Image.EXTENT,
-            data=[img.width/4, img.height/4, img.width*3/4, img.height*3/4])))
-
-        m = 0.3
-        xshift = abs(m)*img.width
-        trans.append(numpy.array(img.transform(img.size, Image.AFFINE,
-            [1, m, -xshift if m > 0 else 0,0,1,0], Image.BICUBIC)))
-
-        trans.append(numpy.array(img.transpose(method=Image.FLIP_LEFT_RIGHT)))
-        trans.append(numpy.array(img.transpose(method=Image.FLIP_TOP_BOTTOM)))
-    return numpy.array(trans)
