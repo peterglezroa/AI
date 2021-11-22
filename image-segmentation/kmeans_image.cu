@@ -10,12 +10,39 @@
 #define TPB 512
 #define NLIMIT 100
 
+/* Function to group the elements in its nearest cluster.
+ * Returns the distance to said cluster. */
+__device__
+float grouping(const int elemID, const int dims, const int nclusters,
+const float *clusters, const float *elems, int *elemClus) {
+    float dist, elemDist, cPos;
+
+    // Start by considering as part of the first cluster
+    elemClus[elemID] = 0;
+    elemDist = rnormf(dims, clusters);
+    for (int i = 1; i < nclusters; i++) {
+        // Calculate the position of the cluster in the linearized matrix
+        cPos = i*dims;
+
+        // Calculate distance
+        dist = normf(dims, clusters + cPos);
+
+        // See if it is less than the distance to the current cluster
+        if (dist < elemDist) {
+            elemClus[elemID] = i;
+            elemDist = dist;
+        }
+    }
+
+    return elemDist;
+}
+
 /* Function to update the centroid to be in the middle of the calculated
  * clusters.
  * returns: the distance moved */
 __device__
 float updateCentroid(const int clusID, const int dims, float *clusters,
-const int nelems, const float *elems, int elemClus) {
+const int nelems, const float *elems, int *elemClus) {
     float avg, dis = 0;
     int cPos = clusID*dims;
 
@@ -80,22 +107,23 @@ int *elemClus, float *entropy) {
             // Calculate 
             if (tid < nelems)
                 elemDis[tid] = grouping(tid, dims, nclusters, clusters, elems,
-                    elemClus, elemDis);
+                    elemClus);
 
-            _syncthreads();
+            __syncthreads();
 
             if (tid < nclusters)
                 movedDis[tid] = updateCentroid(tid, dims, clusters, nelems,
                     elems, elemClus);
 
-            _syncthreads();
+            __syncthreads();
 
             if (tid < 1) {
                 // Calculate entropy
                 entropy[epochs] = calcMean(nelems, elemDis);
-                if (testChange(nclusters, prevclusters, clusters)) break;
+                if (testChange(nclusters, movedDis)) break;
             }
         }
+        // TODO: copy to bestCluster
     }
 }
 
@@ -113,8 +141,8 @@ int *elemClus, float *dst) {
 
 int main(int argc, char *argv[]) {
     cv::Mat og, src, dst;
-    int size, nelems;
-    int nClusters, epochs;
+    int size, channels, nelems;
+    int nclusters, epochs, limit;
     float *dstRaw;
 
     float *gpu_src, *gpu_dst, *gpu_clusters, *gpu_entropy;
@@ -137,10 +165,15 @@ int main(int argc, char *argv[]) {
 
     // Scan image and convert it to float
     fprintf(stdout, "Reading image...\n");
-    og = cv::imread(argv[1], cv::IMREAD_COLORS);
+    og = cv::imread(argv[1], cv::IMREAD_COLOR);
     og.convertTo(src, CV_32F);
     nelems = src.rows * src.cols;
+    channels = src.channels();
     size = src.rows * src.cols * og.channels();
+
+    // Allocate CPU
+    fprintf(stdout, "Allocating memory in CPU...\n");
+    dstRaw = (float *)malloc(sizeof(float)*size);
 
     // Copy to gpu
     fprintf(stdout, "Allocating memory in GPU...\n");
@@ -160,7 +193,7 @@ int main(int argc, char *argv[]) {
 
     // Call modified image
     fprintf(stdout, "Applying colors...\n");
-    colorClusters<<<nelems/TPB + 1, TPB>>>(channels, *gpu_clusters, nelems,
+    colorClusters<<<nelems/TPB + 1, TPB>>>(channels, gpu_clusters, nelems,
     gpu_elemClus, gpu_dst);
 
     // Copy processed data to CPU
