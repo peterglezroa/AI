@@ -25,7 +25,7 @@ const float *clusters, const float *elems, int *elemClus) {
         cPos = i*dims;
 
         // Calculate distance
-        dist = normf(dims, clusters + cPos);
+        dist = normf(dims, &clusters[(int)cPos]);
 
         // See if it is less than the distance to the current cluster
         if (dist < elemDist) {
@@ -92,14 +92,7 @@ int testChange(const int nclusters, const float *distances){
 __global__
 void kmeans(const int dims, const int epochs, const int limit,
 const int nclusters, float *clusters, const int nelems, float *elems,
-int *elemClus, float *entropy) {
-    // shared elemDis
-    __shared__ float elemDis[nelems];
-    // shared distance moved
-    __shared__ float movedDis[nclusters];
-    // shared best clusters
-    __shared__ float bestClusters[nclusters*dims];
-
+int *elemClus, float *entropy, float *elemDis, float *movedDis, float *bC) {
     int tid = threadIdx.x + (blockIdx.x * blockDim.x);
 
     for (int i = 0; i < epochs; i++) {
@@ -140,28 +133,41 @@ int *elemClus, float *dst) {
 }
 
 int main(int argc, char *argv[]) {
-    cv::Mat og, src, dst;
+    cv::Mat og, src, dst, finalDst;
     int size, channels, nelems;
     int nclusters, epochs, limit;
     float *dstRaw;
 
     float *gpu_src, *gpu_dst, *gpu_clusters, *gpu_entropy;
     int *gpu_elemClus;
+    float *gpu_elemDis, *gpu_movedDis, *gpu_bC;
 
-    if (argc != 5) {
+    if (argc != 6) {
         fprintf(
             stderr, 
-            "usage: %s <image path> <n clusters> <epochs> <result file>\n",
+            "usage: %s <image> <n clusters> <epochs> <nlimit> <result img>\n",
             argv[0]
         );
         return -1;
     }
 
-    // TODO: Scan number of clusters
+    // Scan number of clusters
+    if ( (nclusters = atoi(argv[2])) == 0) {
+        fprintf(stderr, "%s is not a valid number for nclusters\n", argv[2]);
+        return -2;
+    }
 
-    // TODO: Scan number of epochs
+    // Scan number of epochs
+    if ( (epochs = atoi(argv[3])) == 0) {
+        fprintf(stderr, "%s is not a valid number for epochs\n", argv[3]);
+        return -3;
+    }
 
-    // TODO: Scan limit
+    // Scan limit
+    if ( (limit = atoi(argv[4])) == 0) {
+        fprintf(stderr, "%s is not a valid number for nlimit\n", argv[4]);
+        return -4;
+    }
 
     // Scan image and convert it to float
     fprintf(stdout, "Reading image...\n");
@@ -183,13 +189,21 @@ int main(int argc, char *argv[]) {
     cudaMalloc((void**) &gpu_entropy, sizeof(float)*epochs);
     cudaMalloc((void**) &gpu_dst, sizeof(float)*size);
 
+    // Element distance to its cluster
+    cudaMalloc((void**) &gpu_elemDis, sizeof(float)*nelems);
+    // Distance that the cluster moved
+    cudaMalloc((void**) &gpu_movedDis, sizeof(float)*nclusters);
+    // Saved best performing clusters
+    cudaMalloc((void**) &gpu_bC, sizeof(float)*nclusters*channels);
+
     fprintf(stdout, "Uploading image to GPU...\n");
     cudaMemcpy(gpu_src, src.data, sizeof(float)*size, cudaMemcpyHostToDevice);
 
     // Call kmeans
     fprintf(stdout, "Applying kmeans...\n");
     kmeans<<<nelems/TPB + 1, TPB>>>(channels, epochs, limit, nclusters,
-    gpu_clusters, nelems, gpu_src, gpu_elemClus, gpu_entropy);
+    gpu_clusters, nelems, gpu_src, gpu_elemClus, gpu_entropy,
+    gpu_elemDis, gpu_movedDis, gpu_bC);
 
     // Call modified image
     fprintf(stdout, "Applying colors...\n");
@@ -202,14 +216,15 @@ int main(int argc, char *argv[]) {
     // Convert result to opencv
     fprintf(stdout, "Obtaining image from GPU...\n");
     dst = cv::Mat(src.rows, src.cols, src.type(), dstRaw, cv::Mat::AUTO_STEP);
+    dst.convertTo(finalDst, CV_8U);
 
     // Display images
     fprintf(stdout, "Displaying images...\n");
-//    cv::namedWindow("Original", cv::WINDOW_AUTOSIZE);
-//    cv::imshow("Original", src);
-//    cv::namedWindow("GrayScale", cv::WINDOW_AUTOSIZE);
-//    cv::imshow("GrayScale", dst);
-//    cv::waitKey(0);
+    cv::namedWindow("Original", cv::WINDOW_AUTOSIZE);
+    cv::imshow("Original", og);
+    cv::namedWindow("GrayScale", cv::WINDOW_AUTOSIZE);
+    cv::imshow("GrayScale", dst);
+    cv::waitKey(0);
 
     cudaFree(gpu_src); cudaFree(gpu_dst); cudaFree(gpu_clusters);
     cudaFree(gpu_elemClus); cudaFree(gpu_entropy);
