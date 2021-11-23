@@ -12,163 +12,13 @@
 #include <opencv2/imgcodecs/imgcodecs.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 
+#include "cuda_kmeans.cuh"
+
 #define TPB 512
 #define NLIMIT 100
 
 #define LOGS 1
 #define MAXDISPLAY 100
-
-static void HandleCudaError(cudaError_t err, const char *file, int line) {
-    if (err != cudaSuccess) {
-        printf( "%s in %s at line %d\n", cudaGetErrorString( err ),
-                file, line );
-        exit( EXIT_FAILURE );
-    }
-}
-#define HCUDAERR( err ) (HandleCudaError( err, __FILE__, __LINE__ ))
-
-/* Setup cura state */
-__global__
-void setupKernel(curandState *state){
-  int idx = threadIdx.x+blockDim.x*blockIdx.x;
-  curand_init(1234, idx, 0, &state[idx]);
-}
-
-/* Sets the centroid to a random point */
-__device__
-void randomPoint(curandState *state, const int clusID, const int dims,
-float *clusters, const int nelems, const float *elems) {
-    int cPos = clusID*dims;
-    // Generate random
-    // https://stackoverflow.com/questions/18501081/generating-random-number-within-cuda-kernel-in-a-varying-range
-    // uniform dist
-    float frand;
-    int ePos;
-    for(int c = 0; c <= clusID; c++)
-        // Do this for clusID iterations
-        frand = curand_uniform(&(state[clusID]));
-        frand *= nelems-1;
-        ePos = (int)truncf(frand);
-        ePos *= dims;
-    for (int i = 0; i < dims; i++)
-        clusters[cPos+i] = elems[ePos+i];
-}
-
-/* Function to group the elements in its nearest cluster.
- * Returns the distance to said cluster. */
-__device__
-float grouping(const int elemID, const int dims, const int nclusters,
-const float *clusters, const float *elems, int *elemClus) {
-    float dist, elemDist, cPos;
-
-    // Start by considering as part of the first cluster
-    elemClus[elemID] = 0;
-    elemDist = rnormf(dims, clusters);
-    for (int i = 1; i < nclusters; i++) {
-        // Calculate the position of the cluster in the linearized matrix
-        cPos = i*dims;
-
-        // Calculate distance
-        dist = normf(dims, &clusters[(int)cPos]);
-
-        // See if it is less than the distance to the current cluster
-        if (dist < elemDist) {
-            elemClus[elemID] = i;
-            elemDist = dist;
-        }
-    }
-
-    return elemDist;
-}
-
-/* Function to update the centroid to be in the middle of the calculated
- * clusters.
- * returns: the distance moved */
-__device__
-float updateCentroid(const int clusID, const int dims, float *clusters,
-const int nelems, const float *elems, int *elemClus) {
-    float avg, dis = 0;
-    int cPos = clusID*dims;
-    int counter = 0;
-
-    for (int i = 0; i < dims; i++) {
-        avg = 0;
-        for (int j = 0; j < nelems; j++)
-            if (elemClus[j] == clusID) {
-                avg += elems[dims*j + i];
-                counter++;
-            }
-        avg /= counter;
-        dis += fabsf(clusters[cPos+i] - avg);
-        clusters[cPos + i] = avg;
-    }
-
-    return dis;
-}
-
-__device__
-float calcMean(const int n, const float *elems) {
-    float mean = 0;
-    for (int i = 0; i < n; i++) mean += elems[i]/n;
-    return mean;
-}
-
-/* Function to check if the clusters moved.
- * Returns a boolean (false -> if they moved, true -> they didnt) */
-__device__
-int testChange(const int nclusters, const float *distances){
-    for (int i = 0; i < nclusters; i++) if(distances[i] > 0) return false;
-    return true;
-}
-
-/* Runs the kmean algorithm:
- * Inputs:
- *   - dims <int>: Number of dimensions
- *   - epochs <int>: Number of iterations
- *   - limit <int>: Number of updates to centroid until it gives up on finding
-                the sweet spot.
- *   - nclusters <int>: Number of clusters to calculate
- *   - clusters <float*>: Pointer where all the clusters will be saved.
- *              size(float[nclusters*dims])
- *   - nelems <int>: Number of elems received
- *   - elems <float*>: Pointer to all the data. size(float[nelems*dims])
- *   - elemClus <int*>: Array where the relation elem-cluster is saved.
- *              size(int[nelems])
- *   - entropy <float*>: Pointer to where to save the calculated entropy per
- *              iteration. size(float[epochs])
- */
-__global__
-void kmeans(curandState *state, const int dims, const int epochs, const int limit,
-const int nclusters, float *clusters, const int nelems, float *elems,
-int *elemClus, float *entropy, float *elemDis, float *movedDis, float *bC) {
-    int tid = threadIdx.x + (blockIdx.x * blockDim.x);
-
-    for (int i = 0; i < epochs; i++) {
-        if (tid < nclusters)
-            randomPoint(state+tid, tid, dims, clusters, nelems, elems);
-        for (int j = 0; j < limit; j++) {
-            // Calculate 
-            if (tid < nelems)
-                elemDis[tid] = grouping(tid, dims, nclusters, clusters, elems,
-                    elemClus);
-
-            __syncthreads();
-
-            if (tid < nclusters)
-                movedDis[tid] = updateCentroid(tid, dims, clusters, nelems,
-                    elems, elemClus);
-
-            __syncthreads();
-
-            if (tid < 1) {
-                // Calculate entropy
-                entropy[epochs] = calcMean(nelems, elemDis);
-                if (testChange(nclusters, movedDis)) break;
-            }
-        }
-        // TODO: copy to bestCluster
-    }
-}
 
 __global__
 void colorClusters(const int dims, float *clusters, const int nelems,
@@ -188,8 +38,20 @@ const int nclusters, float *clusters, const int nelems, float *elems,
 int *elemClus, float *entropy, float *elemDis, float *movedDis, float *bC) {
     int tid = threadIdx.x + (blockIdx.x * blockDim.x);
 
-    if (tid < nclusters)
-        randomPoint(state+tid, tid, dims, clusters, nelems, elems);
+    for (int i = 0; i < epochs; i++) {
+        if (tid < nclusters)
+            randomPoint(state+tid, tid, dims, clusters, nelems, elems);
+        for (int j = 0; j < limit; j++) {
+            // Calculate 
+            if (tid < nelems)
+                elemDis[tid] = grouping(tid, dims, nclusters, clusters, elems,
+                    elemClus);
+
+//            __syncthreads();
+
+        }
+        // TODO: copy to bestCluster
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -281,26 +143,13 @@ int main(int argc, char *argv[]) {
     HCUDAERR(cudaMemcpy(gpu_clusters, clusters, sizeof(float)*nclusters*channels,
         cudaMemcpyHostToDevice));
 
-    for(int i = 0 ; i < 10 ; i++) {
-        test<<<nclusters*channels/TPB + 1, TPB>>>(gpu_state, channels, epochs, limit, nclusters,
-        gpu_clusters, nelems, gpu_src, gpu_elemClus, gpu_entropy,
-        gpu_elemDis, gpu_movedDis, gpu_bC);
-        cudaMemcpy(clusters, gpu_clusters, sizeof(float)*nclusters*channels,
-            cudaMemcpyDeviceToHost);
-
-        fprintf(stdout, "Resulting clusters:\n");
-        // Log clusters
-        for (int i = 0; i < nclusters; i++) {
-            fprintf(stdout, "\t#%i: ", i);
-            for (int j = 0; j < channels; j++)
-                fprintf(stdout, "%.1f ", clusters[i*channels+j]);
-            fprintf(stdout, "\n");
-        }
-    }
+    test<<<nclusters*channels/TPB + 1, TPB>>>(gpu_state, channels, epochs, limit, nclusters,
+    gpu_clusters, nelems, gpu_src, gpu_elemClus, gpu_entropy,
+    gpu_elemDis, gpu_movedDis, gpu_bC);
 
     // Print logs
     if(LOGS) {
-//        float *clusters = (float *)malloc(sizeof(float)*nclusters*channels);
+        float *clusters = (float *)malloc(sizeof(float)*nclusters*channels);
         cudaMemcpy(clusters, gpu_clusters, sizeof(float)*nclusters*channels,
             cudaMemcpyDeviceToHost);
 
@@ -313,7 +162,6 @@ int main(int argc, char *argv[]) {
             fprintf(stdout, "\n");
         }
 
-        /*
         float *entropy = (float *)malloc(sizeof(float)*epochs);
         cudaMemcpy(entropy, gpu_entropy, sizeof(float)*epochs,
             cudaMemcpyDeviceToHost);
@@ -321,7 +169,6 @@ int main(int argc, char *argv[]) {
         for (int i = 0; i < epochs; i++)
             fprintf(stdout, "\t%.3f", entropy[i]);
         fprintf(stdout, "\n");
-        free(clusters); free(entropy); free(elemDis); free(elemClus);
 
         float *elemDis = (float *)malloc(sizeof(float)*nelems);
         cudaMemcpy(elemDis, gpu_elemDis, sizeof(float)*nelems,
@@ -338,7 +185,8 @@ int main(int argc, char *argv[]) {
                 fprintf(stdout, "%.1f ", src[i*channels+j]);
             fprintf(stdout, "Cluster (%i, %.1f)\n", elemClus[i], elemDis[i]);
         }
-        */
+
+        free(clusters); free(entropy); free(elemDis); free(elemClus);
     }
 
     /*
