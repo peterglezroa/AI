@@ -18,6 +18,15 @@
 #define LOGS 1
 #define MAXDISPLAY 100
 
+static void HandleCudaError(cudaError_t err, const char *file, int line) {
+    if (err != cudaSuccess) {
+        printf( "%s in %s at line %d\n", cudaGetErrorString( err ),
+                file, line );
+        exit( EXIT_FAILURE );
+    }
+}
+#define HCUDAERR( err ) (HandleCudaError( err, __FILE__, __LINE__ ))
+
 /* Setup cura state */
 __global__
 void setupKernel(curandState *state){
@@ -33,12 +42,16 @@ float *clusters, const int nelems, const float *elems) {
     // Generate random
     // https://stackoverflow.com/questions/18501081/generating-random-number-within-cuda-kernel-in-a-varying-range
     // uniform dist
-    float frand = curand_uniform(&(state[clusID]));
-    frand *= nelems-1;
-    int ePos = (int)truncf(frand);
-    ePos *= dims;
+    float frand;
+    int ePos;
+    for(int c = 0; c <= clusID; c++)
+        // Do this for clusID iterations
+        frand = curand_uniform(&(state[clusID]));
+        frand *= nelems-1;
+        ePos = (int)truncf(frand);
+        ePos *= dims;
     for (int i = 0; i < dims; i++)
-        clusters[cPos+i] = elems[ePos+1];
+        clusters[cPos+i] = elems[ePos+i];
 }
 
 /* Function to group the elements in its nearest cluster.
@@ -169,6 +182,16 @@ int *elemClus, float *dst) {
     }
 }
 
+__global__
+void test(curandState *state, const int dims, const int epochs, const int limit,
+const int nclusters, float *clusters, const int nelems, float *elems,
+int *elemClus, float *entropy, float *elemDis, float *movedDis, float *bC) {
+    int tid = threadIdx.x + (blockIdx.x * blockDim.x);
+
+    if (tid < nclusters)
+        randomPoint(state+tid, tid, dims, clusters, nelems, elems);
+}
+
 int main(int argc, char *argv[]) {
     curandState *gpu_state;
     cv::Mat og, tmp, dst, finalDst;
@@ -210,6 +233,9 @@ int main(int argc, char *argv[]) {
     // Scan image and convert it to float
     fprintf(stdout, "Reading image...\n");
     og = cv::imread(argv[1], cv::IMREAD_COLOR);
+    fprintf(stdout, "Image %s (%ix%ix%i)", argv[1], og.rows, og.cols,
+        og.channels());
+    fprintf(stdout, "Converting image to CV_32F...\n");
     og.convertTo(tmp, CV_32F);
     src = (float*)tmp.data;
     nelems = og.rows * og.cols;
@@ -222,49 +248,60 @@ int main(int argc, char *argv[]) {
 
     // Copy to gpu
     fprintf(stdout, "Allocating memory in GPU...\n");
-    cudaMalloc(&gpu_state, sizeof(curandState));
-    cudaMalloc((void**) &gpu_src, sizeof(float)*size);
-    cudaMalloc((void**) &gpu_clusters, sizeof(float)*nclusters*channels);
-    cudaMalloc((void**) &gpu_elemClus, sizeof(int)*nelems);
-    cudaMalloc((void**) &gpu_entropy, sizeof(float)*epochs);
-    cudaMalloc((void**) &gpu_dst, sizeof(float)*size);
+    HCUDAERR(cudaMalloc(&gpu_state, sizeof(curandState)));
+    HCUDAERR(cudaMalloc((void**) &gpu_src, sizeof(float)*size));
+    HCUDAERR(cudaMalloc((void**) &gpu_clusters, sizeof(float)*nclusters*channels));
+    HCUDAERR(cudaMalloc((void**) &gpu_elemClus, sizeof(int)*nelems));
+    HCUDAERR(cudaMalloc((void**) &gpu_entropy, sizeof(float)*epochs));
+    HCUDAERR(cudaMalloc((void**) &gpu_dst, sizeof(float)*size));
 
     // Element distance to its cluster
-    cudaMalloc((void**) &gpu_elemDis, sizeof(float)*nelems);
+    HCUDAERR(cudaMalloc((void**) &gpu_elemDis, sizeof(float)*nelems));
     // Distance that the cluster moved
-    cudaMalloc((void**) &gpu_movedDis, sizeof(float)*nclusters);
+    HCUDAERR(cudaMalloc((void**) &gpu_movedDis, sizeof(float)*nclusters));
     // Saved best performing clusters
-    cudaMalloc((void**) &gpu_bC, sizeof(float)*nclusters*channels);
+    HCUDAERR(cudaMalloc((void**) &gpu_bC, sizeof(float)*nclusters*channels));
 
     fprintf(stdout, "Uploading image to GPU...\n");
-    cudaMemcpy(gpu_src, src, sizeof(float)*size, cudaMemcpyHostToDevice);
+    HCUDAERR(cudaMemcpy(gpu_src, src, sizeof(float)*size, cudaMemcpyHostToDevice));
 
     // Setup kernel
     fprintf(stdout, "Setting up GPU kernel state...\n");
-    setupKernel<<<nelems/TPB+1, TPB>>>(gpu_state);
+    setupKernel<<<1, 1>>>(gpu_state);
 
     // Call kmeans
     fprintf(stdout, "Applying kmeans...\n");
+    /*
     kmeans<<<nelems/TPB + 1, TPB>>>(gpu_state, channels, epochs, limit, nclusters,
     gpu_clusters, nelems, gpu_src, gpu_elemClus, gpu_entropy,
     gpu_elemDis, gpu_movedDis, gpu_bC);
+    */
+    float *clusters = (float *)malloc(sizeof(float)*nclusters*channels);
+    for (int i = 0; i < nclusters*channels; i++) { clusters[i] = i; }
+    HCUDAERR(cudaMemcpy(gpu_clusters, clusters, sizeof(float)*nclusters*channels,
+        cudaMemcpyHostToDevice));
 
-    // Print logs
-    if(LOGS) {
-        float *clusters = (float *)malloc(sizeof(float)*nclusters*channels);
+    for(int i = 0 ; i < 10 ; i++) {
+        test<<<nclusters*channels/TPB + 1, TPB>>>(gpu_state, channels, epochs, limit, nclusters,
+        gpu_clusters, nelems, gpu_src, gpu_elemClus, gpu_entropy,
+        gpu_elemDis, gpu_movedDis, gpu_bC);
         cudaMemcpy(clusters, gpu_clusters, sizeof(float)*nclusters*channels,
             cudaMemcpyDeviceToHost);
 
-        float *entropy = (float *)malloc(sizeof(float)*epochs);
-        cudaMemcpy(entropy, gpu_entropy, sizeof(float)*epochs,
-            cudaMemcpyDeviceToHost);
+        fprintf(stdout, "Resulting clusters:\n");
+        // Log clusters
+        for (int i = 0; i < nclusters; i++) {
+            fprintf(stdout, "\t#%i: ", i);
+            for (int j = 0; j < channels; j++)
+                fprintf(stdout, "%.1f ", clusters[i*channels+j]);
+            fprintf(stdout, "\n");
+        }
+    }
 
-        float *elemDis = (float *)malloc(sizeof(float)*nelems);
-        cudaMemcpy(elemDis, gpu_elemDis, sizeof(float)*nelems,
-            cudaMemcpyDeviceToHost);
-
-        int *elemClus = (int *)malloc(sizeof(float)*nelems);
-        cudaMemcpy(elemClus, gpu_elemClus, sizeof(int)*nelems,
+    // Print logs
+    if(LOGS) {
+//        float *clusters = (float *)malloc(sizeof(float)*nclusters*channels);
+        cudaMemcpy(clusters, gpu_clusters, sizeof(float)*nclusters*channels,
             cudaMemcpyDeviceToHost);
 
         fprintf(stdout, "Resulting clusters:\n");
@@ -276,6 +313,23 @@ int main(int argc, char *argv[]) {
             fprintf(stdout, "\n");
         }
 
+        /*
+        float *entropy = (float *)malloc(sizeof(float)*epochs);
+        cudaMemcpy(entropy, gpu_entropy, sizeof(float)*epochs,
+            cudaMemcpyDeviceToHost);
+        fprintf(stdout, "\nEntropies:\n");
+        for (int i = 0; i < epochs; i++)
+            fprintf(stdout, "\t%.3f", entropy[i]);
+        fprintf(stdout, "\n");
+        free(clusters); free(entropy); free(elemDis); free(elemClus);
+
+        float *elemDis = (float *)malloc(sizeof(float)*nelems);
+        cudaMemcpy(elemDis, gpu_elemDis, sizeof(float)*nelems,
+            cudaMemcpyDeviceToHost);
+
+        int *elemClus = (int *)malloc(sizeof(float)*nelems);
+        cudaMemcpy(elemClus, gpu_elemClus, sizeof(int)*nelems,
+            cudaMemcpyDeviceToHost);
         fprintf(stdout, "\nElements:\n");
         // Log elements and its distance
         for (int i = 0; i < nelems && i < MAXDISPLAY; i++) {
@@ -284,12 +338,7 @@ int main(int argc, char *argv[]) {
                 fprintf(stdout, "%.1f ", src[i*channels+j]);
             fprintf(stdout, "Cluster (%i, %.1f)\n", elemClus[i], elemDis[i]);
         }
-
-        fprintf(stdout, "\nEntropies:\n");
-        for (int i = 0; i < epochs; i++)
-            fprintf(stdout, "\t%.3f", entropy[i]);
-
-        free(clusters); free(entropy); free(elemDis); free(elemClus);
+        */
     }
 
     /*
