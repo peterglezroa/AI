@@ -27,16 +27,16 @@ from utils import make_csv, view_cluster
 BATCH_SIZE = 200
 IMAGE_SIZE = (224, 224)
 MIN_CLUSTERS = 10
-MAX_CLUSTERS = 20
+MAX_CLUSTERS = 11
 
 def preprocess_image(image) -> numpy.array:
     img = numpy.array(load_img(image, target_size=(224,224)))
     return preprocess_input(img.reshape(224, 224, 3))
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        print(f"usage: {sys.argv[0]} <path where to save/load model> "\
-            "<path to folder including the labeled images>")
+    if len(sys.argv) != 3:
+        print(f"usage: {sys.argv[0]} <path to folder including the labeled images>"
+        "<path where to save/load results>")
         return -1
 
     # Scan directory
@@ -68,7 +68,7 @@ def main() -> int:
     silhouette = list()
     rnge = list(range(MIN_CLUSTERS, MAX_CLUSTERS))
     for k in range(MIN_CLUSTERS, MAX_CLUSTERS):
-        kmeans = KMeans(n_clusters=k).fit(final_features)
+        kmeans = KMeans(n_clusters=k, n_init=500, max_iter=500).fit(final_features)
         # Silhouette
         silhouette.append(
             silhouette_score(final_features, kmeans.labels_, metric="euclidean")
@@ -84,11 +84,12 @@ def main() -> int:
 
     kmeans = KMeans(
         n_clusters=int(optimal_k)+MIN_CLUSTERS,
-        n_init=150
+        n_init=2500,
+        max_iter=1000,
     ).fit(final_features)
 
     # Save results to csv
-    make_csv("vgg19.csv", images[:BATCH_SIZE], kmeans.labels_)
+    make_csv(sys.argv[2], images[:BATCH_SIZE], kmeans.labels_)
 
     # View biggest cluster
     pwd = os.getcwd()
