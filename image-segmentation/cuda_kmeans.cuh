@@ -169,9 +169,9 @@ int nelems, float *data, int *elemClus, float entropy, float *elemDis) {
         fprintf(log, "\n");
     }
 
-    fprintf(log, "\nEntropy: %f\n", entropy);
+    fprintf(log, "Entropy: %f\n", entropy);
 
-    fprintf(log, "\nElements:\n");
+    fprintf(log, "Elements:\n");
     // Log elements and its distance
     for (int i = 0; i < nelems && i < MAXDISPLAY; i++) {
         fprintf(log, "\t#%i: ", i);
@@ -199,14 +199,16 @@ int epochs, float *entropy, float *gpu_entropy) {
 
 
 int * kmeans(const int dims, const int epochs, const int limit,
-const int nclusters, const int nelems, float *data, FILE *log) {
+const int nclusters, const int nelems, float *data, FILE *log,
+float *gpu_clusters, int *gpu_elemClus) { // Added this so i can use them later
     // HOST data
     float *clusters, *entropy, *elemDis, bestEntropy;
     int size, *elemClus, r;
 
     // GPU data
-    float *gpu_data, *gpu_clusters, *gpu_entropy, *gpu_elemDis, *gpu_movedDis;
-    int *gpu_elemClus;
+//    float *gpu_clusters;
+    float *gpu_data, *gpu_entropy, *gpu_elemDis, *gpu_movedDis;
+//    int *gpu_elemClus;
 
     size = nelems*dims;
 
@@ -219,8 +221,8 @@ const int nclusters, const int nelems, float *data, FILE *log) {
     // Allocate GPU data
     fprintf(log, "Allocating memory in GPU...\n");
     HCUDAERR(cudaMalloc((void**) &gpu_data, sizeof(float)*size));
-    HCUDAERR(cudaMalloc((void**) &gpu_clusters, sizeof(float)*nclusters*dims));
-    HCUDAERR(cudaMalloc((void**) &gpu_elemClus, sizeof(int)*nelems));
+//    HCUDAERR(cudaMalloc((void**) &gpu_clusters, sizeof(float)*nclusters*dims));
+//    HCUDAERR(cudaMalloc((void**) &gpu_elemClus, sizeof(int)*nelems));
     HCUDAERR(cudaMalloc((void**) &gpu_entropy, sizeof(float)*epochs));
     HCUDAERR(cudaMalloc((void**) &gpu_elemDis, sizeof(float)*nelems));
     HCUDAERR(cudaMalloc((void**) &gpu_movedDis, sizeof(float)*nclusters));
@@ -233,7 +235,7 @@ const int nclusters, const int nelems, float *data, FILE *log) {
     // Call kmeans
     fprintf(log, "Applying kmeans...\n");
     for (int i = 0; i < epochs; i++) {
-        fprintf(log, "Iteration (1/%i)\n", epochs);
+        fprintf(log, "\n\nIteration (%i/%i)\n", i, epochs);
         // Random starting points
         for (int j = 0; j < nclusters; j++) {
             r = rand()%nelems;
@@ -273,8 +275,9 @@ const int nclusters, const int nelems, float *data, FILE *log) {
 
     free(clusters); free(entropy); free(elemDis);
 
-    cudaFree(gpu_data); cudaFree(gpu_clusters); cudaFree(gpu_entropy);
-    cudaFree(gpu_elemDis); cudaFree(gpu_elemClus); cudaFree(gpu_movedDis);
+    cudaFree(gpu_data); cudaFree(gpu_entropy);
+    cudaFree(gpu_elemDis); cudaFree(gpu_movedDis);
+//    cudaFree(gpu_clusters); cudaFree(gpu_elemClus);
     return elemClus;
 }
 #endif

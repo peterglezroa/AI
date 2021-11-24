@@ -46,8 +46,8 @@ int *elemClus, float *entropy, float *elemDis, float *movedDis, float *bC) {
 int main(int argc, char *argv[]) {
     cv::Mat og, tmp, dst, finalDst;
     int size, channels, nelems, *elemClus;
-    int nclusters, epochs, limit;
-    float *dstRaw, *src;
+    int nclusters, epochs, limit, *gpu_elemClus;
+    float *dstRaw, *src, *gpu_clusters, *gpu_dst;
 
     srand(time(NULL));
 
@@ -92,12 +92,18 @@ int main(int argc, char *argv[]) {
 
     // Allocate CPU
     fprintf(stdout, "Allocating memory in CPU...\n");
-//    dstRaw = (float *)malloc(sizeof(float)*size);
+    dstRaw = (float *)malloc(sizeof(float)*size);
+
+    // Allocate clusters cause we need it later
+    HCUDAERR(cudaMalloc((void**) &gpu_dst, sizeof(float)*size));
+    HCUDAERR(cudaMalloc((void**) &gpu_clusters, sizeof(float)*nclusters*channels));
+    HCUDAERR(cudaMalloc((void**) &gpu_elemClus, sizeof(int)*size));
+
 
     // Calling kmeans
-    elemClus = kmeans(channels, epochs, limit, nclusters, nelems, src, stdout);
+    elemClus = kmeans(channels, epochs, limit, nclusters, nelems, src, stdout,
+        gpu_clusters, gpu_elemClus);
 
-    /*
     // Call modified image
     fprintf(stdout, "Applying colors...\n");
     colorClusters<<<nelems/TPB + 1, TPB>>>(channels, gpu_clusters, nelems,
@@ -108,19 +114,20 @@ int main(int argc, char *argv[]) {
 
     // Convert result to opencv
     fprintf(stdout, "Obtaining image from GPU...\n");
-    dst = cv::Mat(og.rows, og.cols, og.type(), dstRaw, cv::Mat::AUTO_STEP);
+    dst = cv::Mat(og.rows, og.cols, tmp.type(), dstRaw, cv::Mat::AUTO_STEP);
     dst.convertTo(finalDst, CV_8U);
 
     // Display images
     fprintf(stdout, "Displaying images...\n");
-//    cv::namedWindow("Original", cv::WINDOW_AUTOSIZE);
-//    cv::imshow("Original", og);
-//    cv::namedWindow("GrayScale", cv::WINDOW_AUTOSIZE);
-//    cv::imshow("GrayScale", dst);
-//    cv::waitKey(0);
-    */
+    cv::namedWindow("Original", cv::WINDOW_AUTOSIZE);
+    cv::imshow("Original", og);
+    cv::namedWindow("GrayScale", cv::WINDOW_AUTOSIZE);
+    cv::imshow("GrayScale", finalDst);
+    cv::waitKey(0);
 
-//    free(dstRaw);
+    free(dstRaw);
     free(elemClus);
+
+    cudaFree(gpu_clusters); cudaFree(gpu_elemClus);
     return 0;
 }
