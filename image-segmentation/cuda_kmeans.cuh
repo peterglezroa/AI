@@ -4,6 +4,9 @@
 #include <curand.h>
 #include <curand_kernel.h>
 
+#define TPB 512
+#define MAXDISPLAY 10
+
 static void HandleCudaError(cudaError_t err, const char *file, int line) {
     if (err != cudaSuccess) {
         printf( "%s in %s at line %d\n", cudaGetErrorString( err ),
@@ -30,12 +33,10 @@ float *clusters, const int nelems, const float *elems) {
     // uniform dist
     float frand;
     int ePos;
-    for(int c = 0; c <= clusID; c++)
-        // Do this for clusID iterations
-        frand = curand_uniform(&(state[clusID]));
-        frand *= nelems-1;
-        ePos = (int)truncf(frand);
-        ePos *= dims;
+    frand = curand_uniform(&(state[clusID]));
+    frand *= nelems-1;
+    ePos = (int)truncf(frand);
+    ePos *= dims;
     for (int i = 0; i < dims; i++)
         clusters[cPos+i] = elems[ePos+i];
 }
@@ -130,35 +131,150 @@ int testChange(const int nclusters, const float *distances){
  *              iteration. size(float[epochs])
  */
 __global__
-void kmeans(curandState *state, const int dims, const int epochs, const int limit,
+void gpu_kmeans(const int dims, const int epoch, const int limit,
 const int nclusters, float *clusters, const int nelems, float *elems,
-int *elemClus, float *entropy, float *elemDis, float *movedDis, float *bC) {
+int *elemClus, float *entropy, float *elemDis, float *movedDis) {
     int tid = threadIdx.x + (blockIdx.x * blockDim.x);
 
-    for (int i = 0; i < epochs; i++) {
-        if (tid < nclusters)
-            randomPoint(state+tid, tid, dims, clusters, nelems, elems);
-        for (int j = 0; j < limit; j++) {
-            // Calculate 
-            if (tid < nelems)
-                elemDis[tid] = grouping(tid, dims, nclusters, clusters, elems,
-                    elemClus);
-
-            __syncthreads();
-
+    for (int j = 0; j < limit+1; j++) {
+        // Calculate 
+        if (j > 0) {
             if (tid < nclusters)
                 movedDis[tid] = updateCentroid(tid, dims, clusters, nelems,
                     elems, elemClus);
 
             __syncthreads();
-
-            if (tid < 1) {
-                // Calculate entropy
-                entropy[epochs] = calcMean(nelems, elemDis);
-                if (testChange(nclusters, movedDis)) break;
-            }
         }
-        // TODO: copy to bestCluster
+        if (tid < nelems)
+            elemDis[tid] = grouping(tid, dims, nclusters, clusters, elems,
+                elemClus);
+
+        __syncthreads();
+
+        if (tid < 1) {
+            // Calculate entropy
+            entropy[epoch] = calcMean(nelems, elemDis);
+            if (testChange(nclusters, movedDis)) break;
+        }
     }
+}
+
+void logKmeansEpoch(FILE *log, int dims, int nclusters, float *clusters,
+int nelems, float *data, int *elemClus, float entropy, float *elemDis) {
+    fprintf(log, "Resulting clusters:\n");
+    for (int i = 0; i < nclusters; i++) {
+        fprintf(log, "\t#%i: ", i);
+        for (int j = 0; j < dims; j++)
+            fprintf(log, "%.1f ", clusters[i*dims+j]);
+        fprintf(log, "\n");
+    }
+
+    fprintf(log, "\nEntropy: %f\n", entropy);
+
+    fprintf(log, "\nElements:\n");
+    // Log elements and its distance
+    for (int i = 0; i < nelems && i < MAXDISPLAY; i++) {
+        fprintf(log, "\t#%i: ", i);
+        for (int j = 0; j < dims; j++)
+            fprintf(log, "%.1f ", data[i*dims+j]);
+        fprintf(log, "Cluster (%i, %.1f)\n", elemClus[i], elemDis[i]);
+    }
+}
+
+void copyToHost(int csize, float *clusters, float *gpu_clusters, int nelems,
+int *elemClus, int *gpu_elemClus, float *elemDis, float *gpu_elemDis,
+int epochs, float *entropy, float *gpu_entropy) {
+    // Copy GPU data to HOST
+    HCUDAERR(cudaMemcpy(clusters, gpu_clusters, sizeof(float)*csize,
+        cudaMemcpyDeviceToHost));
+    HCUDAERR(cudaMemcpy(elemClus, gpu_elemClus, sizeof(int)*nelems,
+        cudaMemcpyDeviceToHost));
+
+    HCUDAERR(cudaMemcpy(elemDis, gpu_elemDis, sizeof(float)*nelems,
+        cudaMemcpyDeviceToHost));
+
+    HCUDAERR(cudaMemcpy(entropy, gpu_entropy, sizeof(float)*epochs,
+        cudaMemcpyDeviceToHost));
+}
+
+
+int * kmeans(const int dims, const int epochs, const int limit,
+const int nclusters, const int nelems, float *data, FILE *log) {
+    // HOST data
+    float *clusters, *entropy, *elemDis, bestEntropy;
+    int size, *elemClus, r;
+
+    // GPU data
+    float *gpu_data, *gpu_clusters, *gpu_entropy, *gpu_elemDis, *gpu_movedDis;
+    int *gpu_elemClus;
+
+    size = nelems*dims;
+
+    // Allocate HOST data
+    clusters = (float *)malloc(sizeof(float)*nclusters*dims);
+    elemDis = (float *)malloc(sizeof(float)*nelems);
+    entropy = (float *)malloc(sizeof(float)*nelems);
+    elemClus = (int *)malloc(sizeof(int)*nelems);
+
+    // Allocate GPU data
+    fprintf(log, "Allocating memory in GPU...\n");
+    HCUDAERR(cudaMalloc((void**) &gpu_data, sizeof(float)*size));
+    HCUDAERR(cudaMalloc((void**) &gpu_clusters, sizeof(float)*nclusters*dims));
+    HCUDAERR(cudaMalloc((void**) &gpu_elemClus, sizeof(int)*nelems));
+    HCUDAERR(cudaMalloc((void**) &gpu_entropy, sizeof(float)*epochs));
+    HCUDAERR(cudaMalloc((void**) &gpu_elemDis, sizeof(float)*nelems));
+    HCUDAERR(cudaMalloc((void**) &gpu_movedDis, sizeof(float)*nclusters));
+
+    // Upload data to GPU
+    fprintf(log, "Uploading data to GPU...\n");
+    HCUDAERR(cudaMemcpy(gpu_data, data, sizeof(float)*size,
+        cudaMemcpyHostToDevice));
+
+    // Call kmeans
+    fprintf(log, "Applying kmeans...\n");
+    for (int i = 0; i < epochs; i++) {
+        fprintf(log, "Iteration (1/%i)\n", epochs);
+        // Random starting points
+        for (int j = 0; j < nclusters; j++) {
+            r = rand()%nelems;
+            fprintf(log, "Start point %i: elem %i < ", j, r);
+            for (int k = 0; k < dims; k++) {
+                clusters[j*dims+k] = data[r*dims+k];
+                fprintf(log, "%f ", clusters[j*dims+k]);
+            }
+            fprintf(log, ">\n");
+        }
+        HCUDAERR(cudaMemcpy(gpu_clusters, clusters,
+            sizeof(float)*nclusters*dims, cudaMemcpyHostToDevice));
+
+        gpu_kmeans<<<nelems*dims/TPB + 1, TPB>>>(dims, i, limit, nclusters,
+        gpu_clusters, nelems, gpu_data, gpu_elemClus,
+        gpu_entropy, gpu_elemDis, gpu_movedDis);
+
+        if (log) {
+            // Copy back all data to log it
+            copyToHost(nclusters*dims, clusters, gpu_clusters, nelems, elemClus,
+            gpu_elemClus, elemDis, gpu_elemDis, epochs, entropy, gpu_entropy);
+
+            logKmeansEpoch(log, dims, nclusters, clusters, nelems, data,
+            elemClus, entropy[i], elemDis);
+        } else {
+            // TODO: Only copy the elemClus and entropy to calculate best cluster
+            HCUDAERR(cudaMemcpy(entropy, gpu_entropy, sizeof(float)*epochs,
+                cudaMemcpyDeviceToHost));
+        }
+
+        if (entropy[i] < bestEntropy) {
+            HCUDAERR(cudaMemcpy(elemClus, gpu_elemDis,
+                sizeof(int)*nelems, cudaMemcpyDeviceToHost));
+            bestEntropy = entropy[i];
+        }
+    }
+
+    free(clusters); free(entropy); free(elemDis);
+
+    cudaFree(gpu_data); cudaFree(gpu_clusters); cudaFree(gpu_entropy);
+    cudaFree(gpu_elemDis); cudaFree(gpu_elemClus); cudaFree(gpu_movedDis);
+    return elemClus;
 }
 #endif
